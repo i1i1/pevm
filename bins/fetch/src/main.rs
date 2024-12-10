@@ -2,7 +2,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::{BufReader, Write},
+    io::BufReader,
     num::NonZeroUsize,
 };
 
@@ -69,8 +69,6 @@ async fn main() -> Result<()> {
         File::create(format!("{block_dir}/block.json")).context("Failed to create block file")?;
     serde_json::to_writer(block_file, &block).context("Failed to write block to file")?;
 
-    // Populate bytecodes and state from RPC storage.
-    let mut state = BTreeMap::<Address, EvmAccount>::new();
     // TODO: Deduplicate logic with [for_each_block_from_disk] when there is more usage
     let mut bytecodes: BTreeMap<B256, EvmCode> = match File::open("data/bytecodes.bincode.gz") {
         Ok(compressed_file) => {
@@ -80,6 +78,9 @@ async fn main() -> Result<()> {
         Err(_) => BTreeMap::new(),
     };
     bytecodes.extend(storage.get_cache_bytecodes());
+
+    // Populate bytecodes and state from RPC storage.
+    let mut state = BTreeMap::<Address, EvmAccount>::new();
     for (address, mut account) in storage.get_cache_accounts() {
         if let Some(code) = account.code.take() {
             let code_hash = account
@@ -92,28 +93,32 @@ async fn main() -> Result<()> {
     }
 
     // Write compressed bytecodes to disk.
-    let file_bytecodes = File::create("data/bytecodes.bincode.gz")
+    let writer_bytecodes = File::create("data/bytecodes.bincode.gz")
+        .map(|f| GzEncoder::new(f, Compression::default()))
         .context("Failed to create compressed bytecodes file")?;
-    let serialized_bytecodes =
-        bincode::serialize(&bytecodes).context("Failed to serialize bytecodes to bincode")?;
-    GzEncoder::new(file_bytecodes, Compression::default())
-        .write_all(&serialized_bytecodes)
+    bincode::serialize_into(writer_bytecodes, &bytecodes)
         .context("Failed to write bytecodes to file")?;
 
     // Write pre-state to disk.
     let file_state = File::create(format!("{block_dir}/pre_state.json"))
         .context("Failed to create pre-state file")?;
-    let json_state =
-        serde_json::to_value(&state).context("Failed to serialize pre-state to JSON")?;
-    serde_json::to_writer(file_state, &json_state).context("Failed to write pre-state to file")?;
+    serde_json::to_writer(file_state, &state).context("Failed to write pre-state to file")?;
 
-    // Write block hashes to disk.
-    let block_hashes: BTreeMap<u64, B256> = storage.get_cache_block_hashes().into_iter().collect();
+    // TODO: Deduplicate logic with [for_each_block_from_disk] when there is more usage
+    let mut block_hashes = match File::open("data/block_hashes.bincode") {
+        Ok(compressed_file) => bincode::deserialize_from(compressed_file)
+            .context("Failed to deserialize bytecodes from file")?,
+        Err(_) => BTreeMap::<u64, B256>::new(),
+    };
+
+    block_hashes.extend(storage.get_cache_block_hashes());
+
     if !block_hashes.is_empty() {
-        let file = File::create(format!("{block_dir}/block_hashes.json"))
-            .context("Failed to create block hashes file")?;
-        serde_json::to_writer(file, &block_hashes)
-            .context("Failed to write block hashes to file")?;
+        // Write compressed block hashes to disk
+        let writer_block_hashes = File::create("data/block_hashes.bincode")
+            .context("Failed to create compressed bytecodes file")?;
+        bincode::serialize_into(writer_block_hashes, &block_hashes)
+            .context("Failed to write bytecodes to file")?;
     }
 
     Ok(())
